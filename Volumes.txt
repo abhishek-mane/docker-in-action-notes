@@ -1,0 +1,243 @@
++---------------+
+|	VOLUMES		|
++---------------+
+
+Types
+------
+1. Bind volumes 	-> Bind mount volumes use any user-specified directory or file on the host operating system.
+						1. Useful when share data betn container and host processes
+					
+					eg, 	docker run -d --name bmweb \
+							-v ~/example-docs:/usr/local/apache2/htdocs \
+							-p 80:80 \
+							httpd:latest
+							
+							=> create index.html in ~/example-docs/
+				
+		|=> mounting volumes in readonly mode =>
+				=> docker run --name bmweb_ro \
+					--volume ~/example-docs:/usr/local/apache2/htdocs/:ro \
+					-p 80:80 \
+					httpd:latest		
+					
+		|=> if you specify a host directory that doesn’t exist, Docker will create it for you. Although this can come in handy, relying on this 			functionality isn’t the best idea. It’s better to have more control over the ownership and permissions set on a directory.
+				eg,
+					docker run --rm -v ~/example-docs/absent:/absent alpine:latest \
+					/bin/sh -c 'mount | grep absent'
+					
+					
+		|=> Bind mount volumes aren’t limited to directories, though that’s how they’re frequently used. You can use bind mount volumes to mount 				individual files. This provides the flexibility to create or link resources at a level that avoids conflict with other resources. 				Consider when you want to mount a specific file into a directory that contains other files. Concretely, suppose you only wanted to 				serve a single additional file alongside the web content that shipped with some image. If you use a bind mount of a whole directory 			over that location, the other files will be lost. By using a specific file as a volume, you can override or inject individual files.
+				The important thing to note in this case is that the file must exist on the host before you create the container. Otherwise, Docker 			will assume that you wanted to use a directory, create it on the host, and mount it at the desired location (even if that location is 				occupied by a file).
+			
+2. Managed volumes	-> Managed volumes use locations that are created by the Docker daemon in space controlled by the daemon, called Docker managed space.
+
+		|=> Managed volumes are different from bind mount volumes because the Docker daemon creates managed volumes in a portion of the host’s file 			system that’s owned by Docker.
+					eg,
+						docker run -d \
+						-v /var/lib/cassandra/data \
+						--name cass-shared \
+						alpine echo Data Container
+						
+		|=> docker inspect volume_id	# get information about volume mountpoints on host system
+		
+		
+		
+		
+Sharing Volumes =>
+------------------
+	Two ways to share volumes between containers.
+	
+	1. Host-dependent sharing =>
+			Two or more containers are said to use host-dependent sharing when each has a bind mount volume for a single known location on the 				host file system.
+
+				eg,
+						->	mkdir ~/web-logs-example				# Setup known location
+						
+						->	docker run --name plath -d \			# bind mount point location into a log-writer container
+							-v ~/web-logs-example:/data \
+							dockerinaction/ch4_writer_a
+
+						->	docker run --rm \						# Bind mount the same location into a container for reading
+							-v ~/web-logs-example:/reader-data:ro \
+							alpine:latest \
+							head /reader-data/logA
+							
+						->	tailf ~/web-logs-example/logA
+						
+			*** Q&A: (Need to find answer) => Volumes created using Bind volumes doesn't appears in $(docker volume ls)
+
+
+	2. Generalized sharing and the--volumes-from flag =>
+				The docker run command provides a flag that will copy the volumes from one or more containers to the new container. The flag 
+				--volumes-from can be set multiple times to specify multiple source containers.
+				
+				eg,
+					->	docker run --name fowler \
+						-v ~/example-books:/library/PoEAA \
+						-v /library/DSL \
+						alpine:latest \
+						echo "Fowler collection created."
+						
+					->	docker run --name knuth \
+						-v /library/TAoCP.vol1 \
+						-v /library/TAoCP.vol2 \
+						-v /library/TAoCP.vol3 \
+						-v /library/TAoCP.vol4.a \
+						alpine:latest \
+						echo "Knuth collection created"
+						
+					-> docker run --name reader \
+						--volumes-from fowler \
+						--volumes-from knuth \
+						alpine:latest ls -l /library/
+
+					
+					In this example you created two containers that defined Docker-managed volumes as well as a bind mount volume. 
+					To share these with a third container without the --volumes-from flag, you’d need to inspect the previously 
+					created containers and then craft bind mount volumes to the Docker-managed host directories. 
+					Docker does all this on your behalf when you use the --volumes-from flag.
+					
+					You can copy volumes directly or transitively. This means that if you’re copying the volumes from another container, 
+					you’ll also copy the volumes that it copied from some other container.
+	
+			> Copied volumes always have the same mount point. i.e you can’t use --volumes-from if the container you’re building needs a shared
+			  volume mounted to a different location. It offers no tooling for remapping mount points. 
+			  It will only copy and union the mount points specified by the specified containers.
+			> If volume sources conflict with each other or a new volume specification. If one or more sources create a managed volume with 
+				the same mount point, then a consumer of both will receive only one of the volume definitions
+					
+						eg,
+							>	docker run --name chomsky --volume /library/ss \
+								alpine:latest echo "Chomsky collection created."
+								
+							>	docker run --name lamport --volume /library/ss \
+								alpine:latest echo "Lamport collection created."
+								
+							>	docker run --name student \
+								--volumes-from chomsky --volumes-from lamport \
+								alpine:latest ls -l /library/
+							
+			> you can’t use --volumes-from is if you need to change the write permission of a volume. 
+				This is because --volumes-from copies the full volumes definition. For example, 
+				if your source has a volume mounted with read/write access, and you want to share that with 
+				a container that should have only read access, using --volumes-from won’t work.
+
+
+
+Managed Volume LifeCycle =>
+---------------------------
+
+1. Volume ownership =>
+		
+		> Managed volumes are second-class entities. You have no way to share or delete a specific managed 
+			volume because you have no way to identify a managed volume. Managed volumes are only created 
+			when you omit a bind mount source, and they’re only identifiable by the containers that use them.
+
+
+2. Cleaning up the volumes =>
+		
+		> Cleaning up managed volumes is a manual task. This default functionality prevents accidental destruction of potentially valuable data.
+		> Docker can’t delete bind mount volumes because the source exists outside the Docker scope. 
+			Doing so could result in all manner of conflicts, instability, and unintentional data loss.
+			
+		> Docker can delete managed volumes when deleting containers. Running the docker rm command with the -v 
+			option will attempt to delete any managed volumes referenced by the target container. Any managed volumes 
+			that are referenced by other containers will be skipped, but the internal counters will be decremented.
+
+		> If you delete every container that references a managed volume but fail to use the -v flag, you’ll make that volume an orphan.
+			Removing orphaned volumes requires messy manual steps, but depending on the size of the volumes it may be 
+			worth the effort. Alternatively, there are orphan volume cleanup scripts that you might consider using. 
+			You should carefully check those before running them. You’ll need to run those scripts as a privileged user, 
+			and if they contain malware, you could be handing over full control of your system.
+		
+		> Docker creates volumes in another way that we haven’t discussed. Image metadata can provide volume specifications. 
+			Chapter 7 includes details on this mechanism. In these cases, you may not even be aware of the volumes created 
+			for new containers. This is the primary reason to train yourself to use the -v option.
+
+		> Orphan volumes render disk space unusable until you’ve cleaned them up. You can minimize this problem by 
+			remembering to clean them up and using a volume container pattern
+
+
+
+
+
+Advanced container patterns with volumes
+-----------------------------------------
+		
+		> This section focuses on a couple of advanced but common patterns that you may encounter or 
+			have a reason to employ in your own systems.
+			
+	
+1. Volume container pattern =>
+		
+		> A pattern in which container does little more than provide a handle to volumes. This is useful if you come 
+			across a case for sharing a set of volumes with many containers, or if you can categorize a set of volumes 
+			that fit a common use case.
+			
+					eg, 
+					
+								+---------------+
+								|	vc_data		|
+								|				|			+---------------------------------------+
+								|	/data		|----------->	Docker managed space				|
+								+---------------+			|										|
+										|					|	Volume___________________________	|
+				--volume-from vc_data	|					|	|								|	|
+										|					|	|	/var/lib/docker/vfs/dir/XXX	|	|
+								+-------v-------+			|	|_______________________________|	|
+								|	container 2	|----------->										|
+								|				|			+---------------------------------------+
+								|	/data		|
+								+---------------+
+		
+		> every container that copies volumes from a volume container inherits its mount point definitions.
+
+		> advantages =>
+				eg, uppose you wanted to update your database software (use a new image). If your database container 
+					writes its state to a volume and that volume was defined by a volume container, the migration 
+					would be as simple as shutting down the original database container and starting the new one with 
+					the volume container as a volume source. Backup and restore operations could be handled similarly. 
+					This, of course, assumes that the new database software is able to read the storage format of the old software, 
+					and it looks for the data at the same location.
+					
+		
+
+2. Data packed volume containers
+		
+		> A data-packed volume container is built from an image that copies static content from its image to volumes it defines. 
+			In doing so, these containers can be used to distribute critical architecture information like configuration, 
+			key material, and code.
+			
+		> Data is packed and distributed in an image that also defines a volume.
+		
+		> At container-creation time the data is copied into the volume and is accessible to any containers that 
+			use this volume container
+			
+		> example
+						>	docker run --name dpvc \										# Copy img content into volume
+							-v /config \
+							dockerinaction/ch4_packed /bin/sh -c 'cp /packed/* /config/'
+						
+						>	docker run --rm --volumes-from dpvc \							# List shared material
+							alpine:latest ls /config
+							
+						>	docker run --rm --volumes-from dpvc \							# View shared material
+							alpine:latest cat /config/packedData
+
+
+
+3. Polymorphic container pattern
+
+		> a polymorphic tool is one that you interact with in a consistent way but might have several implementations that do different things.
+		
+		> Using volumes, you can inject different behavior into containers without modifying an image. 
+			A polymorphic container is one that provides some functionality that’s easily substituted using volumes.
+			
+		> For example, you may have an image that contains the binaries for N ode. JS and by default executes a command 
+			that runs the N ode. JS program located at /app/app.js. The image might contain some default implementation that 
+			simply prints “This is a N ode. JS application” to the terminal.
+			
+		> You can change the behavior of containers created from this image by injecting your own app.js implementation using 
+			a volume mounted at /app/app.js. It might make more sense to layer that new functionality in a new image, 
+			but there are some cases when this is the best solution. The first is during development when you might not want 
+			to build a new image each time you iterate. The second is during operational events.
